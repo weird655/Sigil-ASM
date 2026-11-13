@@ -16,9 +16,12 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SIGILC_ROOT = os.environ.get("SIGILC_ROOT", os.path.join(HERE, "..", "Sigil-C"))
-if os.path.isdir(SIGILC_ROOT):
-    sys.path.insert(0, os.path.abspath(SIGILC_ROOT))
+for _candidate in (os.environ.get("SIGILC_ROOT"),
+                   os.path.join(HERE, "..", "Sigil-C"),
+                   os.path.join(HERE, "Sigil-C")):
+    if _candidate and os.path.isdir(_candidate):
+        sys.path.insert(0, os.path.abspath(_candidate))
+        break
 
 from sigilc_core.lexer import Lexer, LexerError  # noqa: E402
 from sigilc_core.nodes import (  # noqa: E402
