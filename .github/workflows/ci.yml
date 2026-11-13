@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  refusal-matrix:
+    name: refusal-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch the Sigil-C front end
+        uses: actions/checkout@v4
+        with:
+          repository: weird655/Sigil-C
+          path: Sigil-C
+
+      - name: Refusal matrix
+        env:
+          SIGILC_ROOT: ${{ github.workspace }}/Sigil-C
+        run: python tests.py
+
+      - name: Build and run the demo
+        run: |
+          python sigil_asm.py demo.sigil -o demo.s
+          gcc demo.s -o demo
+          ./demo
+          test $? -eq 42

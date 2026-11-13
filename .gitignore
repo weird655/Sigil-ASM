@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.s
+*.o
+*.exe
+demo
