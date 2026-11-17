@@ -73,6 +73,7 @@ python sigil_asm.py demo.sigil --check
 
 ```bash
 python tests.py
+python brute_tests.py   # brute backend smoke
 ```
 
 20 项检查：demo 必须干净通过，每个拒绝码各有一个反例，深度和函数数上限各有一个。任何一项不符合预期就退出 `1`。
@@ -82,6 +83,19 @@ python tests.py
 因为每放宽一条，都要先证明：ABI、栈布局、生命周期、类型布局。这个后端只做它能证明的那部分；证明不了就拒绝，而不是猜。
 
 需要更多能力，用 [Sigil-C](https://github.com/weird655/Sigil-C)——它转 C99，有 200 项测试；这里只负责证明"直接到机器码"这条路存在。
+
+## Brute backend
+
+`sigil_asm.py` 是拒绝优先的证明后端；同仓库还有一个暴力版本：
+
+```bash
+python sigil_asm_brute.py demo.sigil -o demo.s
+gcc demo.s -o demo
+```
+
+它复用同一套 `.sigil` 语法和 x86-64 后端，但**不查**溢出、生命周期、堆、越界、`!` 飞线风险。
+当前子集包括整数/指针局部变量、算术、分支、循环、直接调用、字符串、简单指针下标。
+限制与行为见 [`BRUTE.md`](BRUTE.md)。
 
 ## 许可证
 

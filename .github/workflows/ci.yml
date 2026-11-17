@@ -36,3 +36,8 @@ jobs:
           rc=0
           ./demo || rc=$?
           test "$rc" -eq 42
+
+      - name: Brute backend smoke
+        env:
+          SIGILC_ROOT: ${{ github.workspace }}/Sigil-C
+        run: python brute_tests.py
