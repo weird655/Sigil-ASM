@@ -67,6 +67,7 @@ _TYPE_SIZE = {
     "i2": 2, "u2": 2, "short": 2,
     "i4": 4, "u4": 4, "int": 4, "unsigned": 4, "uint32_t": 4, "int32_t": 4,
     "i8": 8, "u8": 8, "long": 8, "uint64_t": 8, "int64_t": 8,
+    "f4": 4, "f8": 8, "fl": 8,
 }
 
 
@@ -84,9 +85,9 @@ def _type_size(t) -> int:
     if isinstance(t, BaseType):
         if t.c_name in _TYPE_SIZE:
             return _TYPE_SIZE[t.c_name]
-        if t.c_name in ("float",):
+        if t.c_name in ("float", "f4"):
             return 4
-        if t.c_name in ("double", "long double"):
+        if t.c_name in ("double", "f8", "long double", "fl"):
             return 8
     return 8
 
@@ -105,8 +106,12 @@ class AsmGenerator:
         self.var_types: Dict[str, object] = {}
         self.structs: Dict[str, Dict[str, tuple]] = {}
         self.struct_sizes: Dict[str, int] = {}
+        self.struct_bits: Dict[str, Dict[str, tuple]] = {}
         self.functions: set = set()
         self.func_name = ""
+        self.float_consts: Dict[str, str] = {}
+        self.float_id = 0
+        self.ret_float = False
         self.locals: Dict[str, int] = {}
         self.frame_size = 0
         self.used = 0
@@ -131,23 +136,64 @@ class AsmGenerator:
             return self.struct_sizes[t.c_name]
         return _type_size(t)
 
+    def is_float(self, t) -> bool:
+        return isinstance(t, BaseType) and t.c_name in ("f4", "f8", "float", "double", "fl", "long double")
+
+    def load_float(self, mem: str, t) -> None:
+        if self.tsize(t) == 4:
+            self.emit(f"movss {mem}, %xmm0")
+            self.emit("cvtss2sd %xmm0, %xmm0")
+        else:
+            self.emit(f"movsd {mem}, %xmm0")
+
+    def store_float(self, mem: str, t) -> None:
+        if self.tsize(t) == 4:
+            self.emit("cvtsd2ss %xmm0, %xmm0")
+            self.emit(f"movss %xmm0, {mem}")
+        else:
+            self.emit(f"movsd %xmm0, {mem}")
+
     def collect_structs(self, nodes) -> None:
         for node in nodes:
             if not isinstance(node, StructDefNode):
                 continue
             layout = {}
+            bits = {}
             off = 0
             max_align = 1
+            unit_off = None
+            unit_size = 0
+            bitpos = 0
             for f in node.fields:
                 if f.bit_width:
-                    self.fail("struct bitfields")
-                sz = self.tsize(f.var_type)
-                al = min(max(sz, 1), 8)
-                off = _align_up(off, al)
-                layout[f.name] = (off, f.var_type)
-                off += sz
-                max_align = max(max_align, al)
+                    sz = self.tsize(f.var_type)
+                    al = min(max(sz, 1), 8)
+                    if unit_off is None or unit_size != sz or bitpos + f.bit_width > sz * 8:
+                        if unit_off is not None:
+                            off = max(off, unit_off + unit_size)
+                        off = _align_up(off, al)
+                        unit_off = off
+                        unit_size = sz
+                        bitpos = 0
+                    bits[f.name] = (unit_off, bitpos, f.bit_width, f.var_type)
+                    bitpos += f.bit_width
+                    off = max(off, unit_off + unit_size)
+                    max_align = max(max_align, al)
+                else:
+                    if unit_off is not None:
+                        off = max(off, unit_off + unit_size)
+                        unit_off = None
+                        bitpos = 0
+                    sz = self.tsize(f.var_type)
+                    al = min(max(sz, 1), 8)
+                    off = _align_up(off, al)
+                    layout[f.name] = (off, f.var_type)
+                    off += sz
+                    max_align = max(max_align, al)
+            if unit_off is not None:
+                off = max(off, unit_off + unit_size)
             self.structs[node.name] = layout
+            self.struct_bits[node.name] = bits
             self.struct_sizes[node.name] = _align_up(off, max_align)
 
     # ------------------------------------------------------------------ types
@@ -198,6 +244,7 @@ class AsmGenerator:
             self.slot(pname, ptype)
         self.collect_vars(fn.body)
         self.frame_size = ((self.used + 15) // 16) * 16
+        self.ret_float = self.is_float(fn.return_type)
         self.ret_label = self.label("ret")
         self.lines.append(f".globl {fn.name}")
         self.lines.append(f"{fn.name}:")
@@ -211,6 +258,24 @@ class AsmGenerator:
         else:
             regs = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
             regs32 = ["%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"]
+        float_params = bool(fn.params) and all(self.is_float(pt) for pt, _ in fn.params)
+        if float_params:
+            xregs = ["%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7"]
+            if len(fn.params) > len(xregs):
+                self.fail("too many float parameters")
+            for i, (ptype, pname) in enumerate(fn.params):
+                self.store_float(self.mem(pname), ptype)
+                # store_float uses xmm0; copy source first
+                if i:
+                    self.emit(f"movapd {xregs[i]}, %xmm0")
+                    self.store_float(self.mem(pname), ptype)
+            self.gen_stmt(fn.body)
+            if not self.lines or self.lines[-1] != f"{self.ret_label}:":
+                self.lines.append(f"{self.ret_label}:")
+            self.emit("leave")
+            self.emit("ret")
+            self.lines.append("")
+            return
         for i, (ptype, pname) in enumerate(fn.params):
             if i >= len(regs):
                 if self.abi == "win64":
@@ -243,6 +308,13 @@ class AsmGenerator:
         if isinstance(stmt, VarDeclStmt):
             if stmt.is_static:
                 self.fail("static local variables")
+            if self.is_float(stmt.var_type):
+                if stmt.init_expr is not None:
+                    self.expr_float(stmt.init_expr)
+                else:
+                    self.emit("pxor %xmm0, %xmm0")
+                self.store_float(self.mem(stmt.name), stmt.var_type)
+                return
             if stmt.init_expr is not None:
                 self.expr(stmt.init_expr)
             else:
@@ -257,7 +329,10 @@ class AsmGenerator:
             return
         if isinstance(stmt, ReturnStmt):
             if stmt.expr is not None:
-                self.expr(stmt.expr)
+                if self.ret_float:
+                    self.expr_float(stmt.expr)
+                else:
+                    self.expr(stmt.expr)
             else:
                 self.emit("xorl %eax, %eax")
             self.emit(f"jmp {self.ret_label}")
@@ -396,12 +471,92 @@ class AsmGenerator:
         self.lines.append(f"{end}:")
         self.break_labels.pop()
 
+    def bitfield_info(self, e: MemberExpr):
+        bt = getattr(e.base, "sem_type", None)
+        if e.is_arrow:
+            sname = bt.pointee.c_name if isinstance(bt, PointerType) and isinstance(bt.pointee, BaseType) else None
+        else:
+            sname = bt.c_name if isinstance(bt, BaseType) else None
+        if sname is None:
+            return None
+        return self.struct_bits.get(sname, {}).get(e.field)
+
+    def load_bitfield(self, e: MemberExpr, info) -> None:
+        _, bit, width, ft = info
+        self.gen_addr(e)
+        size = self.tsize(ft)
+        if size == 1:
+            self.emit("movzbl (%rax), %eax")
+        elif size == 2:
+            self.emit("movzwl (%rax), %eax")
+        elif size == 4:
+            self.emit("movl (%rax), %eax")
+        else:
+            self.emit("movq (%rax), %rax")
+        if bit:
+            self.emit(f"shrq ${bit}, %rax")
+        mask = (1 << width) - 1
+        if mask <= 0x7fffffff:
+            self.emit(f"andq ${mask}, %rax")
+        else:
+            self.emit(f"movabsq ${mask}, %r10")
+            self.emit("andq %r10, %rax")
+        if isinstance(ft, BaseType) and ft.c_name.startswith("i"):
+            self.emit(f"shlq ${64 - width}, %rax")
+            self.emit(f"sarq ${64 - width}, %rax")
+
+    def store_bitfield(self, e: MemberExpr, info) -> None:
+        _, bit, width, ft = info
+        mask = (1 << width) - 1
+        if mask <= 0x7fffffff:
+            self.emit(f"andq ${mask}, %rax")
+        else:
+            self.emit(f"movabsq ${mask}, %r10")
+            self.emit("andq %r10, %rax")
+        if bit:
+            self.emit(f"shlq ${bit}, %rax")
+        self.emit("movq %rax, %r10")
+        size = self.tsize(ft)
+        if size == 1:
+            self.emit("movzbl (%r11), %eax")
+        elif size == 2:
+            self.emit("movzwl (%r11), %eax")
+        elif size == 4:
+            self.emit("movl (%r11), %eax")
+        else:
+            self.emit("movq (%r11), %rax")
+        clear = ~(mask << bit) & 0xFFFFFFFFFFFFFFFF
+        self.emit(f"movabsq ${clear}, %r9")
+        self.emit("andq %r9, %rax")
+        self.emit("orq %r10, %rax")
+        if size == 1:
+            self.emit("movb %al, (%r11)")
+        elif size == 2:
+            self.emit("movw %ax, (%r11)")
+        elif size == 4:
+            self.emit("movl %eax, (%r11)")
+        else:
+            self.emit("movq %rax, (%r11)")
+
     def gen_assign(self, stmt: AssignStmt) -> None:
         if isinstance(stmt.target, IdentExpr):
             name = stmt.target.name
             t = self.var_types.get(name)
             if isinstance(t, ArrayType):
                 self.fail("array assignment")
+            if self.is_float(t):
+                if stmt.op == "=":
+                    self.expr_float(stmt.value)
+                else:
+                    self.load_float(self.mem(name) if name not in self.globals else self.global_mem(name), t)
+                    self.emit("subq $8, %rsp")
+                    self.emit("movsd %xmm0, (%rsp)")
+                    self.expr_float(stmt.value)
+                    self.emit("movsd (%rsp), %xmm1")
+                    self.emit("addq $8, %rsp")
+                    self.float_binop(stmt.op[:-1])
+                self.store_float(self.mem(name) if name not in self.globals else self.global_mem(name), t)
+                return
             size = self.tsize(t) if t is not None else 8
             if stmt.op == "=":
                 self.expr(stmt.value)
@@ -416,6 +571,23 @@ class AsmGenerator:
                 self.store_at(self.global_mem(name), size)
             else:
                 self.store_at(self.mem(name), size)
+            return
+        if isinstance(stmt.target, MemberExpr) and self.bitfield_info(stmt.target) is not None:
+            info = self.bitfield_info(stmt.target)
+            assert info is not None
+            self.gen_addr(stmt.target)
+            self.emit("pushq %rax")
+            if stmt.op == "=":
+                self.expr(stmt.value)
+            else:
+                self.load_bitfield(stmt.target, info)
+                self.emit("pushq %rax")
+                self.expr(stmt.value)
+                self.emit("movq %rax, %rcx")
+                self.emit("popq %rax")
+                self.binop(stmt.op[:-1], "%rcx")
+            self.emit("popq %r11")
+            self.store_bitfield(stmt.target, info)
             return
         if isinstance(stmt.target, (IndexExpr, MemberExpr, UnaryExpr)):
             t = getattr(stmt.target, "sem_type", None)
@@ -490,6 +662,16 @@ class AsmGenerator:
                 self.emit("addq %rcx, %rax")
             return
         if isinstance(e, MemberExpr):
+            binfo = self.bitfield_info(e)
+            if binfo is not None:
+                bt = getattr(e.base, "sem_type", None)
+                if e.is_arrow:
+                    self.expr(e.base)
+                else:
+                    self.gen_addr(e.base)
+                if binfo[0]:
+                    self.emit(f"addq ${binfo[0]}, %rax")
+                return
             bt = getattr(e.base, "sem_type", None)
             if e.is_arrow:
                 self.expr(e.base)
@@ -512,6 +694,9 @@ class AsmGenerator:
 
     # --------------------------------------------------------------- expressions
     def expr(self, e: ExprNode) -> None:
+        if self.is_float(getattr(e, "sem_type", None)):
+            self.expr_float(e)
+            return
         if isinstance(e, LiteralExpr):
             self.gen_literal(e)
             return
@@ -540,6 +725,10 @@ class AsmGenerator:
             self.gen_binary(e)
             return
         if isinstance(e, CastExpr):
+            if self.is_float(getattr(e.operand, "sem_type", None)):
+                self.expr_float(e.operand)
+                self.emit("cvttsd2si %xmm0, %rax")
+                return
             self.expr(e.operand)
             size = self.tsize(e.target_type)
             if size == 1:
@@ -556,6 +745,10 @@ class AsmGenerator:
             self.emit(f"movq ${self.tsize(t)}, %rax")
             return
         if isinstance(e, MemberExpr):
+            info = self.bitfield_info(e)
+            if info is not None:
+                self.load_bitfield(e, info)
+                return
             self.gen_addr(e)
             ft = getattr(e, "sem_type", None)
             sz = self.tsize(ft) if ft is not None else 8
@@ -634,8 +827,127 @@ class AsmGenerator:
         else:
             self.fail(f"unary {e.op}")
 
+    def expr_float(self, e: ExprNode) -> None:
+        if isinstance(e, LiteralExpr):
+            if e.lit_kind == "FLOAT_NUM":
+                label = f".Lfp{self.float_id}"
+                self.float_id += 1
+                self.float_consts[label] = e.code.rstrip("fFlL")
+                self.emit(f"movsd {label}(%rip), %xmm0")
+                return
+            if e.lit_kind == "INT_NUM":
+                self.gen_literal(e)
+                self.emit("cvtsi2sd %rax, %xmm0")
+                return
+            self.fail("float literal")
+        if isinstance(e, CastExpr):
+            if self.is_float(e.target_type):
+                if self.is_float(getattr(e.operand, "sem_type", None)):
+                    self.expr_float(e.operand)
+                else:
+                    self.expr(e.operand)
+                    self.emit("cvtsi2sd %rax, %xmm0")
+                return
+            self.fail("float cast target")
+        if isinstance(e, IdentExpr):
+            t = self.var_types.get(e.name)
+            if not self.is_float(t):
+                self.expr(e)
+                self.emit("cvtsi2sd %rax, %xmm0")
+                return
+            if e.name in self.globals:
+                self.load_float(self.global_mem(e.name), t)
+            else:
+                self.load_float(self.mem(e.name), t)
+            return
+        if isinstance(e, MemberExpr):
+            ft = getattr(e, "sem_type", None)
+            if not self.is_float(ft):
+                self.expr(e)
+                self.emit("cvtsi2sd %rax, %xmm0")
+                return
+            self.gen_addr(e)
+            self.load_float("(%rax)", ft)
+            return
+        if isinstance(e, UnaryExpr) and e.op == "-":
+            self.expr_float(e.operand)
+            self.emit("subq $8, %rsp")
+            self.emit("movsd %xmm0, (%rsp)")
+            self.emit("pxor %xmm1, %xmm1")
+            self.emit("subsd (%rsp), %xmm1")
+            self.emit("addq $8, %rsp")
+            self.emit("movapd %xmm1, %xmm0")
+            return
+        if isinstance(e, BinaryExpr):
+            self.gen_float_arith(e)
+            return
+        if isinstance(e, CallExpr):
+            self.gen_call(e)
+            return
+        if isinstance(e, TernaryExpr):
+            else_l = self.label("felse")
+            end_l = self.label("fend")
+            self.expr(e.cond)
+            self.emit("testq %rax, %rax")
+            self.emit(f"jz {else_l}")
+            self.expr_float(e.then_expr)
+            self.emit(f"jmp {end_l}")
+            self.lines.append(f"{else_l}:")
+            self.expr_float(e.else_expr)
+            self.lines.append(f"{end_l}:")
+            return
+        # mixed int -> double
+        if not self.is_float(getattr(e, "sem_type", None)):
+            self.expr(e)
+            self.emit("cvtsi2sd %rax, %xmm0")
+            return
+        self.fail("float expression")
+
+    def float_binop(self, op: str) -> None:
+        if op == "+":
+            self.emit("addsd %xmm1, %xmm0")
+        elif op == "*":
+            self.emit("mulsd %xmm1, %xmm0")
+        elif op == "-":
+            self.emit("subsd %xmm0, %xmm1")
+            self.emit("movapd %xmm1, %xmm0")
+        elif op == "/":
+            self.emit("divsd %xmm0, %xmm1")
+            self.emit("movapd %xmm1, %xmm0")
+        else:
+            self.fail(f"float operator {op}")
+
+    def gen_float_arith(self, e: BinaryExpr) -> None:
+        self.expr_float(e.left)
+        self.emit("subq $8, %rsp")
+        self.emit("movsd %xmm0, (%rsp)")
+        self.expr_float(e.right)
+        self.emit("movsd (%rsp), %xmm1")
+        self.emit("addq $8, %rsp")
+        self.float_binop(e.op)
+
+    def gen_float_cmp(self, e: BinaryExpr) -> None:
+        self.expr_float(e.left)
+        self.emit("subq $8, %rsp")
+        self.emit("movsd %xmm0, (%rsp)")
+        self.expr_float(e.right)
+        self.emit("movsd (%rsp), %xmm1")
+        self.emit("addq $8, %rsp")
+        self.emit("ucomisd %xmm0, %xmm1")
+        cc = {"==": "e", "!=": "ne", "<": "b", "<=": "be", ">": "a", ">=": "ae"}[e.op]
+        self.emit(f"set{cc} %al")
+        self.emit("movzbq %al, %rax")
+
     def gen_binary(self, e: BinaryExpr) -> None:
         op = e.op
+        lt = getattr(e.left, "sem_type", None)
+        rt = getattr(e.right, "sem_type", None)
+        if op in ("<", "<=", ">", ">=", "==", "!=") and (self.is_float(lt) or self.is_float(rt)):
+            self.gen_float_cmp(e)
+            return
+        if op in ("+", "-", "*", "/") and self.is_float(getattr(e, "sem_type", None)):
+            self.gen_float_arith(e)
+            return
         if op in ("&&", "||"):
             end = self.label("logicend")
             short = self.label("logicshort")
@@ -697,6 +1009,24 @@ class AsmGenerator:
             self.emit("movq (%rax), %rax")
 
     def gen_call(self, e: CallExpr) -> None:
+        if e.args and all(self.is_float(getattr(a, "sem_type", None)) for a in e.args):
+            if not isinstance(e.callee, IdentExpr):
+                self.fail("indirect float call")
+            xregs = (["%xmm0", "%xmm1", "%xmm2", "%xmm3"] if self.abi == "win64"
+                     else ["%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7"])
+            if len(e.args) > len(xregs):
+                self.fail("too many float call arguments")
+            for a in e.args:
+                self.expr_float(a)
+                self.emit("subq $8, %rsp")
+                self.emit("movsd %xmm0, (%rsp)")
+            for i in range(len(e.args) - 1, -1, -1):
+                self.emit(f"movsd (%rsp), {xregs[i]}")
+                self.emit("addq $8, %rsp")
+            self.emit("subq $32, %rsp")
+            self.emit(f"call {e.callee.name}")
+            self.emit("addq $32, %rsp")
+            return
         indirect = not isinstance(e.callee, IdentExpr)
         if not indirect:
             assert isinstance(e.callee, IdentExpr)
@@ -793,8 +1123,14 @@ class AsmGenerator:
         self.lines.append(".text")
         for fn in funcs:
             self.gen_function(fn)
-        if self.strings:
+        if self.strings or self.float_consts:
             self.lines.append(".section .rodata")
+        if self.float_consts:
+            self.lines.append(".align 8")
+            for lab, val in self.float_consts.items():
+                self.lines.append(f"{lab}:")
+                self.lines.append(f"    .double {val}")
+        if self.strings:
             for label, code in self.strings.items():
                 self.lines.append(f"{label}:")
                 self.lines.append(f"    .string {code}")

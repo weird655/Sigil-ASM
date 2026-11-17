@@ -73,7 +73,10 @@ i4 main(v.) {
     rc = control_flow()
     if rc:
         return rc
-    return win64_args()
+    rc = win64_args()
+    if rc:
+        return rc
+    return floats_and_bits()
 
 
 def structs_and_fp() -> int:
@@ -242,6 +245,43 @@ i4 main(v.) { r; sum5(1, 2, 3, 4, 5); }
         print(f"win64 args: expected 15, got {r.returncode}", file=sys.stderr)
         return 1
     print("win64 args: 5 args exit 15")
+    return 0
+
+
+def floats_and_bits() -> int:
+    src = """s{ B {
+    u4 a w! 4;
+    u4 b w! 4;
+};
+f8 fadd(f8 a, f8 b) { r; a + b; }
+i4 main(v.) {
+    o! B x;
+    x.a m, 5;
+    x.b m, 9;
+    o! f8 z m, fadd(1.5, 2.5);
+    r; x.a + x.b + (i4)(z * 2.0);
+}
+"""
+    work = tempfile.mkdtemp(prefix="sigil-asm-floatbits-")
+    src_path = os.path.join(work, "fb.sigil")
+    spath = os.path.join(work, "fb.s")
+    exe = os.path.join(work, "fb.exe")
+    with open(src_path, "w", encoding="utf-8") as f:
+        f.write(src)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "sigil_asm_brute.py"), src_path, "-o", spath],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run(["gcc", spath, "-o", exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run([exe], capture_output=True, text=True)
+    if r.returncode != 22:
+        print(f"float/bits: expected 22, got {r.returncode}", file=sys.stderr)
+        return 1
+    print("float/bits: x.a+x.b+fadd*2 exit 22")
     return 0
 
 

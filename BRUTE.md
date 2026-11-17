@@ -49,6 +49,8 @@ host platform.
 - structs with natural field layout
 - function pointers and indirect calls
 - `sizeof(type)`
+- f4/f8 locals, arithmetic, comparisons and casts
+- bitfield struct layout and read/write
 - `!reg` register rewrites, `!asm` and `!{...}!` raw-assembly flylines
 - pointer subscript reads/writes
 - `p@ a[i]` address-of
@@ -57,7 +59,7 @@ host platform.
 
 Not supported (fails loudly):
 
-- bitfields, floats
+- mixed int/float function signatures (only all-float or all-int calls)
 - complex `!` package/plant forms
 - indirect calls / function pointers
 - stack-passed arguments
