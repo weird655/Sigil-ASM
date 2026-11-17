@@ -67,7 +67,10 @@ i4 main(v.) {
     rc = flyline()
     if rc:
         return rc
-    return stack_args()
+    rc = stack_args()
+    if rc:
+        return rc
+    return control_flow()
 
 
 def structs_and_fp() -> int:
@@ -170,6 +173,45 @@ i4 main(v.) { r; sum7(1, 2, 3, 4, 5, 6, 7); }
         print(f"stack args: expected 28, got {r.returncode}", file=sys.stderr)
         return 1
     print("stack args: SysV 7 args exit 28")
+    return 0
+
+
+def control_flow() -> int:
+    src = """i4 main(v.) {
+    o! i4 x m, 2;
+    o! i4 res m, 0;
+    s? (x) {
+        k: 1: { res m, 10; b!; }
+        k: 2: { res m, 20; b!; }
+        d: { res m, 30; }
+    }
+    o! i4 y m, 0;
+    l! again;
+    y m+ 1;
+    i? (y < 3) { g! again; }
+    r; res + y;
+}
+"""
+    work = tempfile.mkdtemp(prefix="sigil-asm-flow-")
+    src_path = os.path.join(work, "flow.sigil")
+    spath = os.path.join(work, "flow.s")
+    exe = os.path.join(work, "flow.exe")
+    with open(src_path, "w", encoding="utf-8") as f:
+        f.write(src)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "sigil_asm_brute.py"), src_path, "-o", spath],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run(["gcc", spath, "-o", exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run([exe], capture_output=True, text=True)
+    if r.returncode != 23:
+        print(f"control flow: expected 23, got {r.returncode}", file=sys.stderr)
+        return 1
+    print("control flow: switch/goto exit 23")
     return 0
 
 

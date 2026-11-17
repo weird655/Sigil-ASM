@@ -34,10 +34,12 @@ from sigilc_core.nodes import (
     ExprStmt,
     ForStmt,
     FuncDefNode,
+    GotoStmt,
     IdentExpr,
     IfStmt,
     IndexExpr,
     JumpStmt,
+    LabelStmt,
     MemberExpr,
     LiteralExpr,
     PreprocNode,
@@ -45,6 +47,7 @@ from sigilc_core.nodes import (
     SizeofExpr,
     StmtNode,
     StructDefNode,
+    SwitchStmt,
     TernaryExpr,
     TrapStmt,
     UnaryExpr,
@@ -103,6 +106,7 @@ class AsmGenerator:
         self.structs: Dict[str, Dict[str, tuple]] = {}
         self.struct_sizes: Dict[str, int] = {}
         self.functions: set = set()
+        self.func_name = ""
         self.locals: Dict[str, int] = {}
         self.frame_size = 0
         self.used = 0
@@ -186,6 +190,7 @@ class AsmGenerator:
             return
         self.locals = {}
         self.used = 0
+        self.func_name = fn.name
         self.break_labels = []
         self.continue_labels = []
         # params first
@@ -334,6 +339,15 @@ class AsmGenerator:
             else:
                 self.fail(f"jump {stmt.keyword}")
             return
+        if isinstance(stmt, LabelStmt):
+            self.lines.append(f".L{self.func_name}_{stmt.name}:")
+            return
+        if isinstance(stmt, GotoStmt):
+            self.emit(f"jmp .L{self.func_name}_{stmt.label}")
+            return
+        if isinstance(stmt, SwitchStmt):
+            self.gen_switch(stmt)
+            return
         if isinstance(stmt, TrapStmt):
             self.emit("ud2")
             return
@@ -346,6 +360,40 @@ class AsmGenerator:
                 self.lines.append(raw)
             return
         self.fail(type(stmt).__name__)
+
+    def const_value(self, e: ExprNode) -> int:
+        if isinstance(e, LiteralExpr) and e.lit_kind in ("INT_NUM", "CHAR"):
+            raw = e.code.strip()
+            if e.lit_kind == "CHAR":
+                return ord(raw.strip("'"))
+            raw = raw.replace("u", "").replace("U", "").replace("l", "").replace("L", "")
+            return int(raw, 0)
+        if isinstance(e, UnaryExpr) and e.op == "-":
+            return -self.const_value(e.operand)
+        self.fail("non-constant switch case")
+
+    def gen_switch(self, stmt: SwitchStmt) -> None:
+        end = self.label("endswitch")
+        self.break_labels.append(end)
+        self.expr(stmt.cond)
+        self.emit("movq %rax, %r10")
+        labels = []
+        default = None
+        for case in stmt.cases:
+            lab = self.label("case")
+            labels.append((case, lab))
+            if case.value is None:
+                default = lab
+            else:
+                self.emit(f"cmpq ${self.const_value(case.value)}, %r10")
+                self.emit(f"je {lab}")
+        self.emit(f"jmp {default or end}")
+        for case, lab in labels:
+            self.lines.append(f"{lab}:")
+            for s in case.stmts:
+                self.gen_stmt(s)
+        self.lines.append(f"{end}:")
+        self.break_labels.pop()
 
     def gen_assign(self, stmt: AssignStmt) -> None:
         if isinstance(stmt.target, IdentExpr):
