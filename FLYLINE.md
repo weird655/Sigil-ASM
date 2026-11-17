@@ -7,15 +7,15 @@ Sigil-ASM 的 brute 后端在 Parser 之前处理三类 `!` 飞线。它们不�
 ## 1. 寄存器改写
 
 ```sigil
-!reg %rax = 7!
-!reg %rbx += 3!
-!reg %rcx = %rax!
+!reg %rax m, 7!
+!reg %rbx m+ 3!
+!reg %rcx m, %rax!
 ```
 
 支持：
 
 ```text
-=  +=  -=  &=  |=  ^=
+m,  m+  m-  m*  m&  m|  m^  m<<  m>>
 ```
 
 只支持 64 位寄存器：
@@ -76,8 +76,8 @@ movq %rax, %rcx
 
 ```sigil
 i4 main(v.) {
-    !reg %rax = 7!
-    !reg %rbx += 3!
+    !reg %rax m, 7!
+    !reg %rbx m+ 3!
     !asm "nop"!
     !{ nop
        nop }!

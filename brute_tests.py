@@ -112,8 +112,8 @@ i4 main(v.) {
 
 def flyline() -> int:
     src = """i4 main(v.) {
-    !reg %rax = 7!
-    !reg %rbx += 3!
+    !reg %rax m, 7!
+    !reg %rbx m+ 3!
     !asm "nop"!
     !{ nop
        nop }!

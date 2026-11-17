@@ -786,7 +786,7 @@ class AsmGenerator:
         return "\n".join(self.lines) + "\n"
 
 
-_REG_RE = re.compile(r"^\s*!reg\s+(%[a-z0-9]+)\s*(=|\+=|-=|&=|\|=|\^=|<<=|>>=)\s*(.+?)\s*!\s*$")
+_REG_RE = re.compile(r"^\s*!reg\s+(%[a-z0-9]+)\s*(m,|m\+|m-|m\*|m&|m\||m\^|m<<|m>>|=|\+=|-=|&=|\|=|\^=|<<=|>>=)\s*(.+?)\s*!\s*$")
 _ASM_RE = re.compile(r"^\s*!asm\s+\"(.*)\"!\s*$")
 
 
@@ -803,9 +803,13 @@ def _flyline_reg(line: str) -> str | None:
         src = value
     else:
         return "#asm " + "/* unsupported register value */"
-    ins = {"=": "movq", "+=": "addq", "-=": "subq", "&=": "andq", "|=": "orq", "^=": "xorq"}.get(op)
+    ins = {"m,": "movq", "m+": "addq", "m-": "subq", "m&": "andq",
+           "m|": "orq", "m^": "xorq", "m*": "imulq", "m<<": "salq", "m>>": "sarq",
+           "=": "movq", "+=": "addq", "-=": "subq", "&=": "andq", "|=": "orq", "^=": "xorq"}.get(op)
     if ins is None:
         return "#asm " + f"/* unsupported register op {op} */"
+    if op in ("m<<", "m>>", "m*") and not re.fullmatch(r"-?\d+", value):
+        return "#asm " + f"/* {op} needs an immediate */"
     return f"#asm {ins} {src}, {reg}"
 
 

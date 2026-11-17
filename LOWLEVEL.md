@@ -118,7 +118,7 @@ i4 main(v.) {
 也可以用 `!` 形式，见 [`FLYLINE.md`](FLYLINE.md)：
 
 ```sigil
-!reg %rax = 7!
+!reg %rax m, 7!
 !asm "nop"!
 !{ movq $1, %rax
    nop }!
