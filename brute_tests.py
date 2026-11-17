@@ -61,6 +61,44 @@ i4 main(v.) {
         print(f"lowlevel: expected 15, got {r.returncode}", file=sys.stderr)
         return 1
     print("lowlevel: arrays/pointers/#asm exit 15")
+    rc = structs_and_fp()
+    return rc
+
+
+def structs_and_fp() -> int:
+    src = """s{ P {
+    i4 x;
+    i4 y;
+};
+i4 add(i4 a, i4 b) { r; a + b; }
+i4 main(v.) {
+    o! P p;
+    p.x m, 10;
+    p.y m, 20;
+    o! f^(i4, i4) -> i4 cb m, add;
+    r; p.x + p.y + cb(4, 5);
+}
+"""
+    work = tempfile.mkdtemp(prefix="sigil-asm-struct-")
+    spath = os.path.join(work, "s.s")
+    exe = os.path.join(work, "s.exe")
+    src_path = os.path.join(work, "s.sigil")
+    with open(src_path, "w", encoding="utf-8") as f:
+        f.write(src)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "sigil_asm_brute.py"), src_path, "-o", spath],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run(["gcc", spath, "-o", exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run([exe], capture_output=True, text=True)
+    if r.returncode != 39:
+        print(f"struct/fp: expected 39, got {r.returncode}", file=sys.stderr)
+        return 1
+    print("struct/fp: exit 39")
     return 0
 
 

@@ -46,6 +46,9 @@ host platform.
 - string literals + `printf`
 - unary `- ! ~ * &`
 - local arrays and real stack slots
+- structs with natural field layout
+- function pointers and indirect calls
+- `sizeof(type)`
 - pointer subscript reads/writes
 - `p@ a[i]` address-of
 - `#asm "..."` raw assembly injection
@@ -53,7 +56,7 @@ host platform.
 
 Not supported (fails loudly):
 
-- structs, bitfields, floats
+- bitfields, floats
 - complex `!` package/plant forms
 - indirect calls / function pointers
 - stack-passed arguments
