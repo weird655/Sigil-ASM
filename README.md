@@ -94,7 +94,7 @@ gcc demo.s -o demo
 
 它复用同一套 `.sigil` 语法和 x86-64 后端，但**不查**溢出、生命周期、堆、越界、`!` 飞线风险。
 当前子集包括整数/指针局部变量、算术、分支、循环、直接调用、字符串、简单指针下标。
-限制与行为见 [`BRUTE.md`](BRUTE.md)，底层写法见 [`LOWLEVEL.md`](LOWLEVEL.md)。
+限制与行为见 [`BRUTE.md`](BRUTE.md)，底层写法见 [`LOWLEVEL.md`](LOWLEVEL.md)，`!` 穿透见 [`FLYLINE.md`](FLYLINE.md)。
 
 ## 许可证
 

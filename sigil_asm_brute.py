@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 import argparse
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -723,8 +724,74 @@ class AsmGenerator:
         return "\n".join(self.lines) + "\n"
 
 
+_REG_RE = re.compile(r"^\s*!reg\s+(%[a-z0-9]+)\s*(=|\+=|-=|&=|\|=|\^=|<<=|>>=)\s*(.+?)\s*!\s*$")
+_ASM_RE = re.compile(r"^\s*!asm\s+\"(.*)\"!\s*$")
+
+
+def _flyline_reg(line: str) -> str | None:
+    m = _REG_RE.match(line)
+    if not m:
+        return None
+    reg, op, value = m.groups()
+    if not reg.startswith("%r"):
+        return "#asm " + "/* unsupported register */"
+    if re.fullmatch(r"-?\d+", value):
+        src = "$" + value
+    elif re.fullmatch(r"%[a-z0-9]+", value):
+        src = value
+    else:
+        return "#asm " + "/* unsupported register value */"
+    ins = {"=": "movq", "+=": "addq", "-=": "subq", "&=": "andq", "|=": "orq", "^=": "xorq"}.get(op)
+    if ins is None:
+        return "#asm " + f"/* unsupported register op {op} */"
+    return f"#asm {ins} {src}, {reg}"
+
+
+def preprocess_flylines(src: str) -> str:
+    """Turn !reg/!asm/!{...}! into #asm preprocessor lines."""
+    out = []
+    lines = src.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _ASM_RE.match(line)
+        if m:
+            out.append("#asm " + m.group(1))
+            i += 1
+            continue
+        r = _flyline_reg(line)
+        if r is not None:
+            out.append(r)
+            i += 1
+            continue
+        if line.strip().startswith("!{"):
+            body = []
+            rest = line.split("!{", 1)[1]
+            if "}!" in rest:
+                out.append("#asm " + rest.split("}!", 1)[0].strip())
+                i += 1
+                continue
+            if rest.strip():
+                body.append(rest)
+            i += 1
+            while i < len(lines) and "}!" not in lines[i]:
+                body.append(lines[i])
+                i += 1
+            if i < len(lines):
+                body.append(lines[i].split("}!", 1)[0])
+                i += 1
+            for b in body:
+                if b.strip():
+                    out.append("#asm " + b.rstrip())
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out) + "\n"
+
+
 def compile_asm(src: str, filename: str = "input.sigil", abi: str = "sysv") -> str:
     EXTERNAL_C_SPELLING.clear()
+    src = preprocess_flylines(src)
     tokens = Lexer(src, filename).tokenize()
     ast = Parser(tokens, filename).parse_program()
     return AsmGenerator(filename, abi).generate(ast)

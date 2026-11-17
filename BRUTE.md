@@ -49,6 +49,7 @@ host platform.
 - structs with natural field layout
 - function pointers and indirect calls
 - `sizeof(type)`
+- `!reg` register rewrites, `!asm` and `!{...}!` raw-assembly flylines
 - pointer subscript reads/writes
 - `p@ a[i]` address-of
 - `#asm "..."` raw assembly injection

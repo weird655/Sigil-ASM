@@ -62,7 +62,9 @@ i4 main(v.) {
         return 1
     print("lowlevel: arrays/pointers/#asm exit 15")
     rc = structs_and_fp()
-    return rc
+    if rc:
+        return rc
+    return flyline()
 
 
 def structs_and_fp() -> int:
@@ -99,6 +101,43 @@ i4 main(v.) {
         print(f"struct/fp: expected 39, got {r.returncode}", file=sys.stderr)
         return 1
     print("struct/fp: exit 39")
+    return 0
+
+
+def flyline() -> int:
+    src = """i4 main(v.) {
+    !reg %rax = 7!
+    !reg %rbx += 3!
+    !asm "nop"!
+    !{ nop
+       nop }!
+    r; 0;
+}
+"""
+    work = tempfile.mkdtemp(prefix="sigil-asm-fly-")
+    src_path = os.path.join(work, "fly.sigil")
+    spath = os.path.join(work, "fly.s")
+    exe = os.path.join(work, "fly.exe")
+    with open(src_path, "w", encoding="utf-8") as f:
+        f.write(src)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "sigil_asm_brute.py"), src_path, "-o", spath],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    text = open(spath, encoding="utf-8").read()
+    if "movq $7, %rax" not in text or "addq $3, %rbx" not in text:
+        print("flyline: register rewrite missing", file=sys.stderr)
+        return 1
+    r = subprocess.run(["gcc", spath, "-o", exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run([exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"flyline: expected 0, got {r.returncode}", file=sys.stderr)
+        return 1
+    print("flyline: !reg/!asm/!{} injected")
     return 0
 
 
