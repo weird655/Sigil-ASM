@@ -208,7 +208,12 @@ class AsmGenerator:
             regs32 = ["%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"]
         for i, (ptype, pname) in enumerate(fn.params):
             if i >= len(regs):
-                self.fail(f"more than {len(regs)} parameters for {self.abi} ASM backend")
+                if self.abi == "win64":
+                    self.fail("stack parameters on win64")
+                off = 16 + 8 * (i - len(regs))
+                self.emit(f"movq {off}(%rbp), %rax")
+                self.emit(f"movq %rax, {self.mem(pname)}")
+                continue
             if self.tsize(ptype) == 8:
                 self.emit(f"movq {regs[i]}, {self.mem(pname)}")
             else:
@@ -647,6 +652,13 @@ class AsmGenerator:
         if not indirect:
             assert isinstance(e.callee, IdentExpr)
             indirect = e.callee.name in self.locals or e.callee.name in self.globals
+        regs = (["%rcx", "%rdx", "%r8", "%r9"] if self.abi == "win64"
+                else ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"])
+        extra = max(0, len(e.args) - len(regs))
+        if extra and self.abi == "win64":
+            self.fail("stack arguments on win64")
+        if indirect and extra:
+            self.fail("indirect call with stack arguments")
         if indirect:
             self.expr(e.callee)
             self.emit("pushq %rax")
@@ -654,24 +666,26 @@ class AsmGenerator:
         else:
             assert isinstance(e.callee, IdentExpr)
             name = e.callee.name
-        for a in e.args:
+        pad = 8 if (extra + (1 if indirect else 0)) % 2 else 0
+        if 32 + pad:
+            self.emit(f"subq ${32 + pad}, %rsp")
+        for a in reversed(e.args[len(regs):]):
             self.expr(a)
             self.emit("pushq %rax")
-        regs = (["%rcx", "%rdx", "%r8", "%r9"] if self.abi == "win64"
-                else ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"])
-        if len(e.args) > len(regs):
-            self.fail(f"more than {len(regs)} call arguments for {self.abi} ASM backend")
-        for i in range(len(e.args) - 1, -1, -1):
+        for a in e.args[:len(regs)]:
+            self.expr(a)
+            self.emit("pushq %rax")
+        for i in range(len(e.args[:len(regs)]) - 1, -1, -1):
             self.emit(f"popq {regs[i]}")
         if indirect:
-            self.emit("popq %r11")
+            # callee is at [rsp + 32 + pad + 8*extra]
+            self.emit(f"movq {32 + pad + 8 * extra}(%rsp), %r11")
         self.emit("xorl %eax, %eax")
-        self.emit("subq $32, %rsp")
         if indirect:
             self.emit("call *%r11")
         else:
             self.emit(f"call {name}")
-        self.emit("addq $32, %rsp")
+        self.emit(f"addq ${32 + pad + 8 * extra + (8 if indirect else 0)}, %rsp")
 
     # --------------------------------------------------------------- top level
     def generate(self, nodes: List[StmtNode]) -> str:

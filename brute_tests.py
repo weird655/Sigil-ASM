@@ -64,7 +64,10 @@ i4 main(v.) {
     rc = structs_and_fp()
     if rc:
         return rc
-    return flyline()
+    rc = flyline()
+    if rc:
+        return rc
+    return stack_args()
 
 
 def structs_and_fp() -> int:
@@ -138,6 +141,35 @@ def flyline() -> int:
         print(f"flyline: expected 0, got {r.returncode}", file=sys.stderr)
         return 1
     print("flyline: !reg/!asm/!{} injected")
+    return 0
+
+
+def stack_args() -> int:
+    src = """i4 sum7(i4 a, i4 b, i4 c, i4 d, i4 e, i4 f, i4 g) {
+    r; a + b + c + d + e + f + g;
+}
+i4 main(v.) { r; sum7(1, 2, 3, 4, 5, 6, 7); }
+"""
+    work = tempfile.mkdtemp(prefix="sigil-asm-args-")
+    src_path = os.path.join(work, "args.sigil")
+    spath = os.path.join(work, "args.s")
+    exe = os.path.join(work, "args.exe")
+    with open(src_path, "w", encoding="utf-8") as f:
+        f.write(src)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "sigil_asm_brute.py"), src_path,
+                        "--abi", "sysv", "-o", spath], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run(["gcc", spath, "-o", exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run([exe], capture_output=True, text=True)
+    if r.returncode != 28:
+        print(f"stack args: expected 28, got {r.returncode}", file=sys.stderr)
+        return 1
+    print("stack args: SysV 7 args exit 28")
     return 0
 
 

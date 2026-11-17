@@ -53,7 +53,7 @@ host platform.
 - pointer subscript reads/writes
 - `p@ a[i]` address-of
 - `#asm "..."` raw assembly injection
-- up to 6 SysV / 4 Win64 arguments
+- SysV register + stack arguments; Win64 up to 4
 
 Not supported (fails loudly):
 
