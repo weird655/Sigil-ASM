@@ -64,8 +64,12 @@ _TYPE_SIZE = {
 
 
 def _type_size(t) -> int:
-    if isinstance(t, (PointerType, ArrayType)):
-        return 8 if isinstance(t, PointerType) else 8
+    if isinstance(t, PointerType):
+        return 8
+    if isinstance(t, ArrayType):
+        if t.size_val is None:
+            return 8
+        return max(8, t.size_val * _type_size(t.element_type))
     if isinstance(t, BaseType):
         if t.c_name in _TYPE_SIZE:
             return _TYPE_SIZE[t.c_name]
@@ -87,6 +91,7 @@ class AsmGenerator:
         self.lines: List[str] = []
         self.strings: Dict[str, str] = {}
         self.globals: Dict[str, str] = {}
+        self.var_types: Dict[str, object] = {}
         self.locals: Dict[str, int] = {}
         self.frame_size = 0
         self.used = 0
@@ -107,10 +112,13 @@ class AsmGenerator:
         raise AsmError(f"{self.filename}: ASM backend does not support {why}")
 
     # ------------------------------------------------------------------ types
-    def slot(self, name: str) -> int:
+    def slot(self, name: str, t=None) -> int:
         if name not in self.locals:
-            self.used += 8
+            size = max(8, _type_size(t)) if t is not None else 8
+            self.used = ((self.used + 7) // 8) * 8 + size
             self.locals[name] = self.used
+            if t is not None:
+                self.var_types[name] = t
         return self.locals[name]
 
     def mem(self, name: str) -> str:
@@ -125,7 +133,7 @@ class AsmGenerator:
             return
         if isinstance(stmt, VarDeclStmt):
             if not stmt.is_static:
-                self.slot(stmt.name)
+                self.slot(stmt.name, stmt.var_type)
         elif isinstance(stmt, BlockStmt):
             for s in stmt.stmts:
                 self.collect_vars(s)
@@ -146,8 +154,8 @@ class AsmGenerator:
         self.break_labels = []
         self.continue_labels = []
         # params first
-        for _, pname in fn.params:
-            self.slot(pname)
+        for ptype, pname in fn.params:
+            self.slot(pname, ptype)
         self.collect_vars(fn.body)
         self.frame_size = ((self.used + 15) // 16) * 16
         self.ret_label = self.label("ret")
@@ -290,12 +298,22 @@ class AsmGenerator:
             self.emit("ud2")
             return
         if isinstance(stmt, PreprocNode):
+            text = stmt.text.strip()
+            if text.startswith("#asm"):
+                raw = text[4:].strip()
+                if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+                    raw = raw[1:-1]
+                self.lines.append(raw)
             return
         self.fail(type(stmt).__name__)
 
     def gen_assign(self, stmt: AssignStmt) -> None:
         if isinstance(stmt.target, IdentExpr):
             name = stmt.target.name
+            t = self.var_types.get(name)
+            if isinstance(t, ArrayType):
+                self.fail("array assignment")
+            size = _type_size(t) if t is not None else 8
             if stmt.op == "=":
                 self.expr(stmt.value)
             else:
@@ -306,17 +324,86 @@ class AsmGenerator:
                 self.emit("popq %rax")
                 self.binop(stmt.op[:-1], "%rcx")
             if name in self.globals:
-                self.emit(f"movq %rax, {self.global_mem(name)}")
+                self.store_at(self.global_mem(name), size)
             else:
-                self.emit(f"movq %rax, {self.mem(name)}")
+                self.store_at(self.mem(name), size)
             return
-        self.fail("non-identifier assignment in ASM backend")
+        if isinstance(stmt.target, (IndexExpr, UnaryExpr)):
+            t = getattr(stmt.target, "sem_type", None)
+            size = _type_size(t) if t is not None else 8
+            if isinstance(stmt.target, UnaryExpr) and stmt.target.op != "*":
+                self.fail("complex assignment")
+            self.gen_addr(stmt.target)
+            self.emit("pushq %rax")
+            if stmt.op == "=":
+                self.expr(stmt.value)
+            else:
+                self.load_addr_from_stack(size)
+                self.emit("pushq %rax")
+                self.expr(stmt.value)
+                self.emit("movq %rax, %rcx")
+                self.emit("popq %rax")
+                self.binop(stmt.op[:-1], "%rcx")
+            self.emit("popq %rcx")
+            self.store_at("(%rcx)", size)
+            return
+        self.fail("non-addressable assignment in ASM backend")
+
+    def store_at(self, addr: str, size: int) -> None:
+        if size == 1:
+            self.emit(f"movb %al, {addr}")
+        elif size == 2:
+            self.emit(f"movw %ax, {addr}")
+        elif size == 4:
+            self.emit(f"movl %eax, {addr}")
+        else:
+            self.emit(f"movq %rax, {addr}")
+
+    def load_addr_from_stack(self, size: int) -> None:
+        self.emit("movq (%rsp), %rax")
+        if size == 1:
+            self.emit("movsbq (%rax), %rax")
+        elif size == 2:
+            self.emit("movswq (%rax), %rax")
+        elif size == 4:
+            self.emit("movslq (%rax), %rax")
+        else:
+            self.emit("movq (%rax), %rax")
 
     def load_lvalue(self, name: str) -> None:
+        t = self.var_types.get(name)
+        if isinstance(t, ArrayType):
+            self.fail("array load")
         if name in self.globals:
             self.emit(f"movq {self.global_mem(name)}, %rax")
         else:
             self.emit(f"movq {self.mem(name)}, %rax")
+
+    def gen_addr(self, e: ExprNode) -> None:
+        if isinstance(e, IdentExpr):
+            if e.name in self.globals:
+                self.emit(f"leaq {self.global_mem(e.name)}, %rax")
+            else:
+                self.emit(f"leaq {self.mem(e.name)}, %rax")
+            return
+        if isinstance(e, IndexExpr):
+            self.expr(e.base)
+            self.emit("pushq %rax")
+            self.expr(e.index)
+            self.emit("movq %rax, %rcx")
+            self.emit("popq %rax")
+            t = getattr(e, "sem_type", None)
+            size = _type_size(t) if t is not None else 8
+            if size in (1, 2, 4, 8):
+                self.emit(f"leaq (%rax,%rcx,{size}), %rax")
+            else:
+                self.emit(f"imulq ${size}, %rcx")
+                self.emit("addq %rcx, %rax")
+            return
+        if isinstance(e, UnaryExpr) and e.op == "*":
+            self.expr(e.operand)
+            return
+        self.fail("address of expression")
 
     # --------------------------------------------------------------- expressions
     def expr(self, e: ExprNode) -> None:
@@ -327,7 +414,10 @@ class AsmGenerator:
             if e.name in self.globals:
                 self.emit(f"movq {self.global_mem(e.name)}, %rax")
             elif e.name in self.locals:
-                self.emit(f"movq {self.mem(e.name)}, %rax")
+                if isinstance(self.var_types.get(e.name), ArrayType):
+                    self.emit(f"leaq {self.mem(e.name)}, %rax")
+                else:
+                    self.emit(f"movq {self.mem(e.name)}, %rax")
             else:
                 self.fail(f"identifier '{e.name}' (function pointers/externs)")
             return
@@ -393,14 +483,10 @@ class AsmGenerator:
 
     def gen_unary(self, e: UnaryExpr) -> None:
         if e.op == "&":
-            if isinstance(e.operand, IdentExpr):
-                name = e.operand.name
-                if name in self.globals:
-                    self.emit(f"leaq {self.global_mem(name)}, %rax")
-                else:
-                    self.emit(f"leaq {self.mem(name)}, %rax")
+            if isinstance(e.operand, (IdentExpr, IndexExpr, UnaryExpr)):
+                self.gen_addr(e.operand)
                 return
-            self.fail("address-of non-identifier")
+            self.fail("address-of expression")
         self.expr(e.operand)
         if e.op == "-":
             self.emit("negq %rax")
@@ -467,13 +553,17 @@ class AsmGenerator:
         self.emit(f"{ins} {rhs}, %rax")
 
     def gen_index(self, e: IndexExpr) -> None:
-        self.expr(e.base)
-        self.emit("pushq %rax")
-        self.expr(e.index)
-        self.emit("movq %rax, %rcx")
-        self.emit("popq %rax")
-        self.emit("leaq (%rax,%rcx,1), %rax")
-        self.emit("movq (%rax), %rax")
+        self.gen_addr(e)
+        t = getattr(e, "sem_type", None)
+        size = _type_size(t) if t is not None else 8
+        if size == 1:
+            self.emit("movsbq (%rax), %rax")
+        elif size == 2:
+            self.emit("movswq (%rax), %rax")
+        elif size == 4:
+            self.emit("movslq (%rax), %rax")
+        else:
+            self.emit("movq (%rax), %rax")
 
     def gen_call(self, e: CallExpr) -> None:
         if not isinstance(e.callee, IdentExpr):
@@ -499,9 +589,16 @@ class AsmGenerator:
         funcs = []
         for node in nodes:
             if isinstance(node, PreprocNode):
+                text = node.text.strip()
+                if text.startswith("#asm"):
+                    raw = text[4:].strip()
+                    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+                        raw = raw[1:-1]
+                    self.lines.append(raw)
                 continue
             if isinstance(node, VarDeclStmt):
                 self.globals[node.name] = "global"
+                self.var_types[node.name] = node.var_type
                 if node.init_expr is None:
                     self.lines.append(f".comm {node.name},8,8")
                 else:

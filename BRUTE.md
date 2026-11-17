@@ -45,17 +45,22 @@ host platform.
 - global integer variables
 - string literals + `printf`
 - unary `- ! ~ * &`
-- simple pointer subscript reads
+- local arrays and real stack slots
+- pointer subscript reads/writes
+- `p@ a[i]` address-of
+- `#asm "..."` raw assembly injection
 - up to 6 SysV / 4 Win64 arguments
 
 Not supported (fails loudly):
 
-- structs, arrays, bitfields, floats
+- structs, bitfields, floats
 - complex `!` package/plant forms
 - indirect calls / function pointers
 - stack-passed arguments
 - complex lvalue writes
 - optimization / register allocation
+
+See [`LOWLEVEL.md`](LOWLEVEL.md) for array/pointer/raw-asm examples.
 
 ## Relation to the strict backend
 
