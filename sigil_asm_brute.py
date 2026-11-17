@@ -214,8 +214,9 @@ class AsmGenerator:
         for i, (ptype, pname) in enumerate(fn.params):
             if i >= len(regs):
                 if self.abi == "win64":
-                    self.fail("stack parameters on win64")
-                off = 16 + 8 * (i - len(regs))
+                    off = 48 + 8 * (i - len(regs))
+                else:
+                    off = 16 + 8 * (i - len(regs))
                 self.emit(f"movq {off}(%rbp), %rax")
                 self.emit(f"movq %rax, {self.mem(pname)}")
                 continue
@@ -703,8 +704,6 @@ class AsmGenerator:
         regs = (["%rcx", "%rdx", "%r8", "%r9"] if self.abi == "win64"
                 else ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"])
         extra = max(0, len(e.args) - len(regs))
-        if extra and self.abi == "win64":
-            self.fail("stack arguments on win64")
         if indirect and extra:
             self.fail("indirect call with stack arguments")
         if indirect:
@@ -714,6 +713,22 @@ class AsmGenerator:
         else:
             assert isinstance(e.callee, IdentExpr)
             name = e.callee.name
+        if self.abi == "win64" and extra:
+            total = 32 + 8 * extra
+            winpad = 8 if total % 16 else 0
+            self.emit(f"subq ${total + winpad}, %rsp")
+            for j, a in enumerate(e.args[len(regs):]):
+                self.expr(a)
+                self.emit(f"movq %rax, {32 + 8 * j}(%rsp)")
+            for a in e.args[:len(regs)]:
+                self.expr(a)
+                self.emit("pushq %rax")
+            for i in range(len(e.args[:len(regs)]) - 1, -1, -1):
+                self.emit(f"popq {regs[i]}")
+            self.emit("xorl %eax, %eax")
+            self.emit("call " + name)
+            self.emit(f"addq ${total + winpad}, %rsp")
+            return
         pad = 8 if (extra + (1 if indirect else 0)) % 2 else 0
         if 32 + pad:
             self.emit(f"subq ${32 + pad}, %rsp")

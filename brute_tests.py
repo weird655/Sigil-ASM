@@ -70,7 +70,10 @@ i4 main(v.) {
     rc = stack_args()
     if rc:
         return rc
-    return control_flow()
+    rc = control_flow()
+    if rc:
+        return rc
+    return win64_args()
 
 
 def structs_and_fp() -> int:
@@ -212,6 +215,33 @@ def control_flow() -> int:
         print(f"control flow: expected 23, got {r.returncode}", file=sys.stderr)
         return 1
     print("control flow: switch/goto exit 23")
+    return 0
+
+
+def win64_args() -> int:
+    src = """i4 sum5(i4 a, i4 b, i4 c, i4 d, i4 e) { r; a + b + c + d + e; }
+i4 main(v.) { r; sum5(1, 2, 3, 4, 5); }
+"""
+    work = tempfile.mkdtemp(prefix="sigil-asm-winargs-")
+    src_path = os.path.join(work, "w.sigil")
+    spath = os.path.join(work, "w.s")
+    exe = os.path.join(work, "w.exe")
+    with open(src_path, "w", encoding="utf-8") as f:
+        f.write(src)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "sigil_asm_brute.py"), src_path,
+                        "--abi", "win64", "-o", spath], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run(["gcc", spath, "-o", exe], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout + r.stderr, file=sys.stderr)
+        return 1
+    r = subprocess.run([exe], capture_output=True, text=True)
+    if r.returncode != 15:
+        print(f"win64 args: expected 15, got {r.returncode}", file=sys.stderr)
+        return 1
+    print("win64 args: 5 args exit 15")
     return 0
 
 
